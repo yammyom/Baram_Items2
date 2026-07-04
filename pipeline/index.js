@@ -31,8 +31,7 @@ const PART_MAP = {
   '캐시 방패/보조무기': 22, '캐시방패/보조무기': 22
 };
 
-const itemCache = new Map();
-const inFlightRequests = new Map(); // 중복 DB 등록 방지용 락
+
 const limit = pLimit(30);
 const webLimit = pLimit(10); // 안정성을 위해 10으로 하향
 
@@ -48,92 +47,6 @@ async function fetchWithRetry(url, params = {}, retries = 3) {
   }
 }
 
-async function initItemCache() {
-  console.log('[*] 아이템 캐시 로드 중...');
-  const { data, error } = await supabase.from('items').select('item_id, name, part_id');
-  if (error) return console.error('❌ 캐시 로드 실패:', error.message);
-  data.forEach(item => itemCache.set(`${item.name}|${item.part_id}`, item.item_id));
-  console.log(`[*] ${itemCache.size}개의 아이템 캐시 로드 완료`);
-}
-
-async function getOrCreateItemIds(items) {
-  const ids = [];
-  const itemsToInsert = [];
-  const inFlightPromises = [];
-
-  // 1. 캐시 및 진행 중인 요청 확인
-  for (const item of items) {
-    const key = `${item.name}|${item.part_id}`;
-    if (itemCache.has(key)) {
-      // 이미 캐시에 있는 경우 최종 단계에서 수집 (중복 삽입 방지)
-    } else if (inFlightRequests.has(key)) {
-      // 이미 DB에 등록 중이라면 대기 리스트에 추가
-      inFlightPromises.push(inFlightRequests.get(key));
-    } else {
-      itemsToInsert.push(item);
-    }
-  }
-
-  // 진행 중인 등록 작업이 있다면 동시 대기
-  if (inFlightPromises.length > 0) {
-    await Promise.all(inFlightPromises);
-  }
-
-  // 다른 요청에 의해 캐시에 들어왔는지 재확인
-  const realItemsToInsert = [];
-  for (const item of itemsToInsert) {
-    const key = `${item.name}|${item.part_id}`;
-    if (itemCache.has(key)) {
-      // 이미 캐시에 있는 경우 최종 단계에서 수집 (중복 삽입 방지)
-    } else {
-      realItemsToInsert.push(item);
-    }
-  }
-
-  // 2. 캐시에 없는 새 아이템들을 DB에 등록
-  if (realItemsToInsert.length > 0) {
-    const uniqueItems = new Map();
-    for (const item of realItemsToInsert) {
-      uniqueItems.set(`${item.name}|${item.part_id}`, item);
-    }
-
-    const insertPromise = (async () => {
-      try {
-        const { data, error } = await supabase.from('items')
-          .upsert(Array.from(uniqueItems.values()), { onConflict: 'name, part_id' })
-          .select();
-
-        if (!error && data) {
-          data.forEach(item => itemCache.set(`${item.name}|${item.part_id}`, item.item_id));
-        }
-      } catch (err) {
-        console.error('❌ 장비 DB 저장 중 에러 발생:', err.message);
-      }
-    })();
-
-    // 동시성 요청들이 이 Promise를 대기할 수 있도록 등록
-    for (const key of uniqueItems.keys()) {
-      inFlightRequests.set(key, insertPromise);
-    }
-
-    await insertPromise;
-
-    // 작업 종료 후 Map에서 제거
-    for (const key of uniqueItems.keys()) {
-      inFlightRequests.delete(key);
-    }
-  }
-
-  // 3. 최종 할당된 ID 수집
-  for (const item of items) {
-    const key = `${item.name}|${item.part_id}`;
-    if (itemCache.has(key)) {
-      ids.push(itemCache.get(key));
-    }
-  }
-
-  return ids;
-}
 
 async function getOcid(characterName, serverName) {
   try {
@@ -191,25 +104,33 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
       itemsToProcess.push(item);
     }
 
-    const itemIds = await getOrCreateItemIds(itemsToProcess);
-
-    if (itemIds.length === 0) {
+    if (itemsToProcess.length === 0) {
       process.stdout.write(characterName + 's'); // s for skipped
       return;
     }
 
+    // 데드락 방지를 위한 다중 정렬 (1순위: part_id 오름차순, 2순위: name 가나다순)
+    itemsToProcess.sort((a, b) => {
+      if (a.part_id !== b.part_id) return a.part_id - b.part_id;
+      return a.name.localeCompare(b.name, 'ko');
+    });
+
     const genderStr = basicResp.data.character_gender;
     const genderCode = genderStr === 'M' ? 1 : (genderStr === 'F' ? 2 : null);
 
-    await supabase.from('users').upsert({
-      server_id: dbServerId,
-      character_name: characterName,
-      job_id: jobCode,
-      gender: genderCode,
-      level: basicResp.data.character_level,
-      equipment_ids: itemIds,
-      updated_at: new Date().toISOString()
-    }, { onConflict: 'server_id, character_name' });
+    const { error } = await supabase.rpc('upsert_character_data', {
+      p_server_id: dbServerId,
+      p_character_name: characterName,
+      p_job_id: jobCode,
+      p_gender: genderCode,
+      p_level: basicResp.data.character_level,
+      p_equipment_json: itemsToProcess
+    });
+
+    if (error) {
+      console.error(`\n❌ RPC 저장 실패 (${characterName}):`, error.message);
+      return;
+    }
 
     process.stdout.write('.');
   } catch { /* skip */ }
@@ -280,8 +201,7 @@ async function runPipeline() {
   const targetJob = targetJobArg ? parseInt(targetJobArg) : null;
   const targetServer = targetServerArg || null;
   const start = new Date().getTime();
-  console.log(`>>> 초고속 경계탐색 파이프라인 가동: ${MIN_PROMOTION_LEVEL}차 ~ ${MAX_PROMOTION_LEVEL}차`, start);
-  await initItemCache();
+  console.log(`>>> 유저 경계탐색 파이프라인 가동: ${MIN_PROMOTION_LEVEL}차 ~ ${MAX_PROMOTION_LEVEL}차`, start);
 
   for (const [serverName, nexonServerCode] of Object.entries(NEXON_SERVERS)) {
     if (targetServer && serverName !== targetServer) continue;
