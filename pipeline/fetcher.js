@@ -100,47 +100,33 @@ export default {
             itemsToProcess.push(item);
           }
 
-          const itemIds = [];
-
-          if (itemsToProcess.length > 0) {
-            // 고유한 아이템 목록만 추출 (한 캐릭터가 같은 아이템 여러 개 착용 대비)
-            const uniqueItems = Array.from(
-              new Map(itemsToProcess.map(item => [`${item.name}|${item.part_id}`, item])).values()
-            );
-
-            // Item Upsert: 이름+부위 조합을 기준으로 DB에 생성/업데이트 후 자동 생성된 item_id 받아오기
-            const { data, error } = await supabase.from('items')
-              .upsert(uniqueItems, { onConflict: 'name, part_id' })
-              .select('item_id, name, part_id');
-
-            if (!error && data) {
-              const idMap = new Map(data.map(d => [`${d.name}|${d.part_id}`, d.item_id]));
-              for (const item of itemsToProcess) {
-                const id = idMap.get(`${item.name}|${item.part_id}`);
-                if (id) itemIds.push(id);
-              }
-            } else if (error) {
-              console.error('Error upserting items:', error);
-            }
-          }
-
-          // 장비가 없는 캐릭터는 저장하지 않고 종료 (불필요한 DB 용량/IO 소모 방지)
-          if (itemIds.length === 0) {
+          if (itemsToProcess.length === 0) {
             msg.ack();
             return;
           }
 
-          // 4. User Upsert (Unique constraint: server_id, character_name)
+          // 데드락 방지를 위한 다중 정렬 (1순위: part_id 오름차순, 2순위: name 가나다순)
+          itemsToProcess.sort((a, b) => {
+            if (a.part_id !== b.part_id) return a.part_id - b.part_id;
+            return a.name.localeCompare(b.name, 'ko');
+          });
+
           const serverId = getServerId(serverName);
-          await supabase.from('users').upsert({
-            server_id: serverId,
-            character_name: characterName,
-            job_id: jobCode,
-            gender: genderCode,
-            level: level,
-            equipment_ids: itemIds,
-            updated_at: new Date().toISOString()
-          }, { onConflict: 'server_id, character_name' });
+
+          const { error } = await supabase.rpc('upsert_character_data', {
+            p_server_id: serverId,
+            p_character_name: characterName,
+            p_job_id: jobCode,
+            p_gender: genderCode,
+            p_level: level,
+            p_equipment_json: itemsToProcess
+          });
+
+          if (error) {
+            console.error(`Error processing ${characterName} (RPC):`, error.message);
+            // 실패 시 nack 처리되도록 throw
+            throw error;
+          }
 
           // 성공적으로 처리된 메시지 확인
           msg.ack();
