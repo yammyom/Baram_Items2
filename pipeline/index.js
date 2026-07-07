@@ -12,7 +12,7 @@ const DB_SERVER_IDS = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동
 const JOBS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
 // 목표 승급 단계 범위 (하향 N차 ~ 상향 M차)
-const MIN_PROMOTION_LEVEL = 9; // 하향 승급
+const MIN_PROMOTION_LEVEL = 7; // 하향 승급
 const MAX_PROMOTION_LEVEL = 9; // 상향 승급
 
 const PART_MAP = {
