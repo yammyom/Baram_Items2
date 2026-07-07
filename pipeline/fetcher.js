@@ -154,9 +154,9 @@ export default {
         server_id: r.data.server_id,
         character_name: r.data.character_name,
         job_id: r.data.job_id,
-        level: r.data.level,
-        exp: r.data.exp.toString(), // BIGINT 문자열화
-        created_at: r.data.created_at
+        level: r.data.level || 0,
+        exp: r.data.exp ? r.data.exp.toString() : '0', // 값이 없으면 문자열 '0'
+        created_at: r.data.created_at || '-' // 값이 없으면 '-'
       }));
 
       try {
