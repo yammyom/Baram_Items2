@@ -45,27 +45,7 @@ async function main() {
   console.log('BigQuery Staging Load 완료.');
 
   // 3. 마스터/팩트 테이블 분배 쿼리 (닉네임/서버 변경 감지 로직 포함)
-  console.log('3. BigQuery 내부 데이터 분배 쿼리 실행...');
-  const mergeQuery = `
-    -- 1) 마스터 테이블 병합
-    MERGE \`${GCP_CREDENTIALS.project_id}.${datasetId}.dim_characters\` T
-    USING \`${GCP_CREDENTIALS.project_id}.${datasetId}.staging_buffer\` S
-    ON T.ocid = S.ocid
-    WHEN MATCHED AND (T.character_name != S.character_name OR T.server_id != S.server_id) THEN
-      UPDATE SET character_name = S.character_name, server_id = S.server_id, job_id = S.job_id
-    WHEN NOT MATCHED THEN
-      INSERT (ocid, server_id, character_name, job_id, created_at)
-      VALUES (S.ocid, S.server_id, S.character_name, S.job_id, S.created_at);
-
-    -- 2) 일일 성장 팩트 테이블 삽입
-    INSERT INTO \`${GCP_CREDENTIALS.project_id}.${datasetId}.fact_daily_growth\` (record_date, ocid, level, exp)
-    SELECT record_date, ocid, level, exp
-    FROM \`${GCP_CREDENTIALS.project_id}.${datasetId}.staging_buffer\`;
-  `;
-
-  const [job] = await bigquery.createQueryJob({ query: mergeQuery });
-  await job.getQueryResults();
-  console.log('데이터 병합 완료. (닉네임 변경 감지 및 성장기록 적재)');
+ console.log('3. 병합 대신 스테이징 적재 완료 (뷰를 통해 조회 가능)');
 
   // 4. Supabase 버퍼 비우기 (다음 날을 위해)
   console.log('4. Supabase 임시 버퍼 비우기...');
