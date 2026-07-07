@@ -48,14 +48,14 @@ async function main() {
  console.log('3. 병합 대신 스테이징 적재 완료 (뷰를 통해 조회 가능)');
 
   // 4. Supabase 버퍼 비우기 (다음 날을 위해)
-  // console.log('4. Supabase 임시 버퍼 비우기...');
-  // const clearResponse = await fetch(`${SUPABASE_URL}/rest/v1/rpc/truncate_growth_buffer`, {
-  //   method: 'POST',
-  //   headers: {
-  //     'apikey': SUPABASE_KEY,
-  //     'Authorization': `Bearer ${SUPABASE_KEY}`
-  //   }
-  // });
+   console.log('4. Supabase 임시 버퍼 비우기...');
+   const clearResponse = await fetch(`${SUPABASE_URL}/rest/v1/rpc/truncate_growth_buffer`, {
+     method: 'POST',
+     headers: {
+      'apikey': SUPABASE_KEY,
+     'Authorization': `Bearer ${SUPABASE_KEY}`
+    }
+   });
 
   if (!clearResponse.ok) throw new Error('Supabase Buffer Truncate 실패');
   console.log('모든 이관 작업이 성공적으로 완료되었습니다!');
