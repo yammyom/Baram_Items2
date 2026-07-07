@@ -94,10 +94,19 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
       itemsToProcess.push(item);
     }
 
-    if (itemsToProcess.length === 0) {
-      process.stdout.write(characterName + 's'); 
-      return null;
-    }
+    const finalEquipment = itemsToProcess.length === 0 ? [] : itemsToProcess;
+
+    return {
+      ocid: ocid,
+      server_id: dbServerId,
+      character_name: characterName,
+      job_id: jobCode,
+      gender: genderCode,
+      level: basicResp.data.character_level || 0,
+      exp: basicResp.data.character_exp ? basicResp.data.character_exp.toString() : '0',
+      created_at: basicResp.data.character_date_create || new Date().toISOString(),
+      equipment_json: finalEquipment // 빈 배열이더라도 저장됨
+    };
 
     itemsToProcess.sort((a, b) => {
       if (a.part_id !== b.part_id) return a.part_id - b.part_id;
