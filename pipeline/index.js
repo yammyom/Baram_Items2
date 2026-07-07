@@ -8,11 +8,12 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANO
 const NEXON_API_KEY = process.env.NEXON_API_KEY;
 
 const NEXON_SERVERS = { '연': 131073, '무휼': 131074, '유리': 131086, '하자': 131087, '호동': 131088, '진': 131089 };
-const DB_SERVER_IDS = { '연': 1, '무휼': 2 };
-const JOBS = [1];
+const DB_SERVER_IDS = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동': 5, '진': 6 };
+const JOBS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
-const MIN_PROMOTION_LEVEL = 9; 
-const MAX_PROMOTION_LEVEL = 9; 
+// 목표 승급 단계 범위 (하향 N차 ~ 상향 M차)
+const MIN_PROMOTION_LEVEL = 7; // 하향 승급
+const MAX_PROMOTION_LEVEL = 9; // 상향 승급
 
 const PART_MAP = {
   '무기': 1, '투구': 2, '갑옷': 3, '왼손': 4, '오른손': 4,
