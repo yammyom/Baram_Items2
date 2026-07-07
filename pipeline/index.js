@@ -8,12 +8,11 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANO
 const NEXON_API_KEY = process.env.NEXON_API_KEY;
 
 const NEXON_SERVERS = { '연': 131073, '무휼': 131074, '유리': 131086, '하자': 131087, '호동': 131088, '진': 131089 };
-const DB_SERVER_IDS = { '연': 1 };
-const JOBS = [1];
+const DB_SERVER_IDS = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동': 5, '진': 6 };
+const JOBS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
-// 목표 승급 단계 범위 (하향 N차 ~ 상향 M차)
-const MIN_PROMOTION_LEVEL = 9; // 하향 승급
-const MAX_PROMOTION_LEVEL = 9; // 상향 승급
+const MIN_PROMOTION_LEVEL = 7; 
+const MAX_PROMOTION_LEVEL = 9; 
 
 const PART_MAP = {
   '무기': 1, '투구': 2, '갑옷': 3, '왼손': 4, '오른손': 4,
@@ -34,14 +33,13 @@ const PART_MAP = {
 const limit = pLimit(30);
 const webLimit = pLimit(10);
 
-// 재시도 로직을 포함한 axios 래퍼
 async function fetchWithRetry(url, params = {}, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
       return await axios.get(url, { params, timeout: 8000 });
     } catch (err) {
       if (i === retries - 1) throw err;
-      await new Promise(r => setTimeout(r, 1000 * (i + 1))); // 지수 백오프
+      await new Promise(r => setTimeout(r, 1000 * (i + 1))); 
     }
   }
 }
@@ -59,7 +57,7 @@ async function getOcid(characterName, serverName) {
 async function processCharacter(characterName, serverName, dbServerId, jobCode) {
   try {
     const ocid = await getOcid(characterName, serverName);
-    if (!ocid) return;
+    if (!ocid) return null;
 
     const [basicResp, equipResp] = await Promise.all([
       axios.get('https://open.api.nexon.com/baram/v1/character/basic', { params: { ocid }, headers: { 'x-nxopen-api-key': NEXON_API_KEY } }),
@@ -97,7 +95,7 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
 
     if (itemsToProcess.length === 0) {
       process.stdout.write(characterName + 's'); 
-      return;
+      return null;
     }
 
     itemsToProcess.sort((a, b) => {
@@ -108,7 +106,6 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
     const genderStr = basicResp.data.character_gender;
     const genderCode = genderStr === 'M' ? 1 : (genderStr === 'F' ? 2 : null);
 
-    // === 반환 객체에 ocid, exp, created_at 추가 ===
     return {
       ocid: ocid,
       server_id: dbServerId,
@@ -192,13 +189,13 @@ async function runPipeline() {
   const start = new Date().getTime();
   console.log(`>>> 유저 경계탐색 파이프라인 가동: ${MIN_PROMOTION_LEVEL}차 ~ ${MAX_PROMOTION_LEVEL}차`, start);
 
-  // 현재 날짜 (KST 기준) - 성장 데이터 파티션용
   const kstDate = new Date(new Date().getTime() + (9 * 60 * 60 * 1000)).toISOString().split('T')[0];
 
   for (const [serverName, nexonServerCode] of Object.entries(NEXON_SERVERS)) {
     if (targetServer && serverName !== targetServer) continue;
     for (const jobCode of JOBS) {
       if (targetJob !== null && jobCode !== targetJob) continue;
+      
       const dbServerId = DB_SERVER_IDS[serverName];
       console.log(`\n[*] 수집 중: ${serverName} (직업: ${jobCode})`);
       const characterNames = await fetchCharacterNamesFromWeb(nexonServerCode, jobCode);
@@ -208,39 +205,38 @@ async function runPipeline() {
       for (let i = 0; i < characterNames.length; i += BATCH_SIZE) {
         const chunk = characterNames.slice(i, i + BATCH_SIZE);
         const results = await Promise.all(chunk.map(name => limit(() => processCharacter(name, serverName, dbServerId, jobCode))));
-        const validResults = results.filter(Boolean);
+        
+        // [핵심 수정] DB 에러 원천 차단: 필수 값이 하나라도 없으면 아예 배열에서 제외
+        const validResults = results.filter(r => r && r.ocid && r.server_id != null && r.character_name);
 
         if (validResults.length > 0) {
-          // === ocid 기준으로 중복 제거 강화 ===
           const dedupMap = new Map();
           for (const r of validResults) {
             dedupMap.set(r.ocid, r); 
           }
           const dedupedResults = Array.from(dedupMap.values());
 
-          // 1. 기존 장비 DB용 Payload
+          // [핵심 수정] 데이터 타입 강제 형변환하여 DB Null 제약조건 방어
           const charactersData = dedupedResults.map(r => ({
-            server_id: r.server_id,
-            character_name: r.character_name,
-            job_id: r.job_id,
-            gender: r.gender,
-            level: r.level,
+            server_id: parseInt(r.server_id, 10),
+            character_name: String(r.character_name),
+            job_id: parseInt(r.job_id, 10),
+            gender: r.gender ? parseInt(r.gender, 10) : null,
+            level: parseInt(r.level, 10) || 0,
             equipment_json: r.equipment_json
           }));
 
-          // 2. 신규 성장 버퍼 DB용 Payload
           const growthData = dedupedResults.map(r => ({
             record_date: kstDate,
-            ocid: r.ocid,
-            server_id: r.server_id,
-            character_name: r.character_name,
-            job_id: r.job_id,
-            level: r.level,
-            exp: r.exp,
-            created_at: r.created_at
+            ocid: String(r.ocid),
+            server_id: parseInt(r.server_id, 10),
+            character_name: String(r.character_name),
+            job_id: parseInt(r.job_id, 10),
+            level: parseInt(r.level, 10) || 0,
+            exp: String(r.exp),
+            created_at: String(r.created_at)
           }));
 
-          // === 두 개의 RPC 동시 호출 ===
           const [equipResult, growthResult] = await Promise.all([
             supabase.rpc('upsert_character_data_batch', { p_characters: charactersData }),
             supabase.rpc('insert_growth_buffer_batch', { p_growth_data: growthData })
