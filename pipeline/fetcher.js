@@ -145,7 +145,7 @@ export default {
         dedupMap.set(r.data.ocid, r);
       }
       const dedupedResults = [...dedupMap.values()];
-      discardedMsgs.forEach(msg => msg.ack());
+      // discardedMsgs.forEach(msg => msg.ack());
       // 1. 기존 장비 DB용 Payload 조립
       const charactersData = dedupedResults.map(r => ({
         server_id: r.data.server_id,
