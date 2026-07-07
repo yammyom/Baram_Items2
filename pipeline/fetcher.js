@@ -56,7 +56,8 @@ export default {
           const genderStr = basicData.character_gender;
           const genderCode = genderStr === 'M' ? 1 : (genderStr === 'F' ? 2 : null);
           const jobCode = JOBS_MAP[basicData.character_class] || 1;
-
+          const exp = basicData.character_exp;
+          const createdAt = basicData.character_date_create;
           // 3. Get Equipment Info
           const equipResponse = await fetch(`https://open.api.nexon.com/baram/v1/character/item-equipment?ocid=${ocid}`, {
             headers: { 'x-nxopen-api-key': NEXON_API_KEY }
@@ -116,11 +117,14 @@ export default {
           return {
             msg,
             data: {
+              ocid: ocid, 
               server_id: serverId,
               character_name: characterName,
               job_id: jobCode,
               gender: genderCode,
               level: level,
+              exp: exp,
+              created_at: createdAt,
               equipment_json: itemsToProcess
             }
           };
@@ -138,28 +142,48 @@ export default {
       // 동일 배치 내 중복 캐릭터 방어 (ON CONFLICT DO UPDATE는 같은 행을 두 번 건드리면 에러)
       const dedupMap = new Map();
       for (const r of validResults) {
-        dedupMap.set(`${r.data.server_id}_${r.data.character_name}`, r);
+        dedupMap.set(r.data.ocid, r);
       }
       const dedupedResults = [...dedupMap.values()];
       discardedMsgs.forEach(msg => msg.ack());
-      const charactersData = dedupedResults.map(r => r.data);
+      // 1. 기존 장비 DB용 Payload 조립
+      const charactersData = dedupedResults.map(r => ({
+        server_id: r.data.server_id,
+        character_name: r.data.character_name,
+        job_id: r.data.job_id,
+        gender: r.data.gender,
+        level: r.data.level,
+        equipment_json: r.data.equipment_json
+      }));
+
+      // 2. 일일 성장 버퍼용 Payload 조립 (KST 기준 날짜)
+      const now = new Date();
+      const kstDate = new Date(now.getTime() + (9 * 60 * 60 * 1000)).toISOString().split('T')[0];
+      
+      const growthData = dedupedResults.map(r => ({
+        record_date: kstDate,
+        ocid: r.data.ocid,
+        server_id: r.data.server_id,
+        character_name: r.data.character_name,
+        job_id: r.data.job_id,
+        level: r.data.level,
+        exp: r.data.exp.toString(), // BIGINT 문자열화
+        created_at: r.data.created_at
+      }));
 
       try {
-        const { error } = await supabase.rpc('upsert_character_data_batch', {
-          p_characters: charactersData
-        });
+        // 병렬로 2개의 RPC 호출
+        const [equipResult, growthResult] = await Promise.all([
+          supabase.rpc('upsert_character_data_batch', { p_characters: charactersData }),
+          supabase.rpc('insert_growth_buffer_batch', { p_growth_data: growthData })
+        ]);
 
-        if (error) {
-          console.error(`Batch RPC Error:`, error.message);
-          throw error;
-        }
+        if (equipResult.error) throw equipResult.error;
+        if (growthResult.error) throw growthResult.error;
 
-        // 성공적으로 저장된 메시지들만 일괄 ack 처리
         dedupedResults.forEach(r => r.msg.ack());
-        console.log(`[+] 성공적으로 ${dedupedResults.length}명 배치 저장 및 ACK 처리 완료.`);
+        console.log(`[+] 성공적으로 ${dedupedResults.length}명 배치 2종 저장 및 ACK 완료.`);
       } catch (dbErr) {
-        // 핸들러가 정상 반환되면 미ack 메시지도 성공 처리로 간주함
-        // 따라서 명시적으로 retry()를 호출해야 실제로 큐가 재전송함
         console.error(`[-] Batch DB 처리 중 에러 발생, 재시도 예약:`, dbErr.message);
         dedupedResults.forEach(r => r.msg.retry({ delaySeconds: 5 }));
       }
