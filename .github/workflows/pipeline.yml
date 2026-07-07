@@ -2,7 +2,7 @@ name: Baram Item Search Pipeline
 
 on:
   schedule:
-    - cron: '0 2,14 * * *' # 매일 한국 시간 오후 11시, 오전 11시 (UTC 2시, 14시)
+    - cron: '0 2,14 * * *' # 매일 한국 시간 오전 11시, 오후 11시 (UTC 2시, 14시)
   workflow_dispatch: # 수동 실행 가능
 
 jobs:
@@ -29,3 +29,27 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           NEXON_API_KEY: ${{ secrets.NEXON_API_KEY }}
         run: node pipeline/index.js
+
+  sync-to-bigquery:
+    needs: run-pipeline # 앞선 수집 작업(run-pipeline)이 완료된 후 실행되도록 의존성 설정
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install BigQuery Dependencies
+        # sync_to_bigquery.js 실행에 필요한 패키지만 가볍게 설치
+        run: npm install @google-cloud/bigquery dotenv
+
+      - name: Run BigQuery Sync Script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GCP_CREDENTIALS_BASE64: ${{ secrets.GCP_CREDENTIALS_BASE64 }}
+        run: node pipeline/sync_to_bigquery.js
