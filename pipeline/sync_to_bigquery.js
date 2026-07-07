@@ -33,7 +33,7 @@ async function main() {
   fs.writeFileSync(filePath, csvText);
   console.log('CSV 다운로드 완료. BigQuery Load 시작...');
 
-  const datasetId = 'user_dataset'; // 생성하신 데이터셋 이름
+  const datasetId = 'baram_dataset'; // 생성하신 데이터셋 이름
 
   // 2. 스테이징 테이블에 덮어쓰기 Load (비용 무료)
   await bigquery.dataset(datasetId).table('staging_buffer').load(filePath, {
