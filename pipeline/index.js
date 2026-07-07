@@ -12,7 +12,7 @@ const DB_SERVER_IDS = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동
 const JOBS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
 // 목표 승급 단계 범위 (하향 N차 ~ 상향 M차)
-const MIN_PROMOTION_LEVEL = 7; // 하향 승급
+const MIN_PROMOTION_LEVEL = 9; // 하향 승급
 const MAX_PROMOTION_LEVEL = 9; // 상향 승급
 
 const PART_MAP = {
@@ -118,22 +118,17 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
     const genderStr = basicResp.data.character_gender;
     const genderCode = genderStr === 'M' ? 1 : (genderStr === 'F' ? 2 : null);
 
-    const { error } = await supabase.rpc('upsert_character_data', {
-      p_server_id: dbServerId,
-      p_character_name: characterName,
-      p_job_id: jobCode,
-      p_gender: genderCode,
-      p_level: basicResp.data.character_level,
-      p_equipment_json: itemsToProcess
-    });
-
-    if (error) {
-      console.error(`\n❌ RPC 저장 실패 (${characterName}):`, error.message);
-      return;
-    }
-
-    process.stdout.write('.');
-  } catch { /* skip */ }
+    return {
+      server_id: dbServerId,
+      character_name: characterName,
+      job_id: jobCode,
+      gender: genderCode,
+      level: basicResp.data.character_level,
+      equipment_json: itemsToProcess
+    };
+  } catch { 
+    return null;
+  }
 }
 
 async function findLastPage(serverCode, jobCode) {
@@ -189,7 +184,7 @@ async function fetchCharacterNamesFromWeb(serverCode, jobCode) {
 async function cleanupOldData() {
   console.log('\n[*] 2일 이상 경과된 오래된 데이터 정리 중...');
   const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
-  const { count, error } = await supabase.from('users').delete().lt('updated_at', twoDaysAgo);
+  const { count, error } = await supabase.from('users').delete({ count: 'exact' }).lt('updated_at', twoDaysAgo);
   if (error) console.error('❌ 데이터 정리 실패:', error.message);
   else console.log(`[*] 정리 완료: ${count || 0}명의 캐릭터 삭제됨`);
 }
@@ -211,7 +206,25 @@ async function runPipeline() {
       console.log(`\n[*] 수집 중: ${serverName} (직업: ${jobCode})`);
       const characterNames = await fetchCharacterNamesFromWeb(nexonServerCode, jobCode);
       console.log(`    -> ${characterNames.length}명의 캐릭터명 수집됨`);
-      await Promise.all(characterNames.map(name => limit(() => processCharacter(name, serverName, dbServerId, jobCode))));
+      
+      const BATCH_SIZE = 100;
+      for (let i = 0; i < characterNames.length; i += BATCH_SIZE) {
+        const chunk = characterNames.slice(i, i + BATCH_SIZE);
+        const results = await Promise.all(chunk.map(name => limit(() => processCharacter(name, serverName, dbServerId, jobCode))));
+        const validResults = results.filter(Boolean);
+        
+        if (validResults.length > 0) {
+          const { error } = await supabase.rpc('upsert_character_data_batch', {
+            p_characters: validResults
+          });
+          
+          if (error) {
+            console.error(`\n❌ 배치 RPC 저장 실패 (${i} ~ ${i + BATCH_SIZE}):`, error.message);
+          } else {
+            process.stdout.write(`[${validResults.length}명 저장] `);
+          }
+        }
+      }
     }
   }
 
