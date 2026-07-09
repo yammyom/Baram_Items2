@@ -2,7 +2,7 @@ name: Baram Item Search Pipeline
 
 on:
   schedule:
-    - cron: '0 12 * * *' # 매일 한국 시간 21시 (UTC 12시) — 하루 1회
+    - cron: '0 10 * * *' # 매일 한국 시간 19시 (UTC 10시) — 하루 1회
   workflow_dispatch: # 수동 실행 가능
 
 jobs:
