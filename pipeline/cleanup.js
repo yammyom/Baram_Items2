@@ -31,20 +31,20 @@ async function cleanupOldMonths() {
     .select('ocid')
     .limit(1);
 
-  // 테이블이 존재하지 않으면 에러 반환 (보통 42P01 undefined_table)
-  if (checkErr && checkErr.code === '42P01') {
-    console.log(`[*] ${targetTable} 테이블이 존재하지 않습니다. (정리 스킵)`);
+  // 테이블이 존재하지 않으면 에러 반환 (PostgREST는 캐시에 없으면 PGRST106 반환, PG는 42P01 반환)
+  if (checkErr && (checkErr.code === '42P01' || checkErr.code === 'PGRST106' || checkErr.message.includes('schema cache'))) {
+    console.log(`[*] ${targetTable} 테이블이 아직 존재하지 않습니다. (정리 스킵)`);
     return;
   }
 
   console.log(`[*] ${targetTable} 테이블이 존재합니다. 데이터 추출 및 전송을 시작합니다.`);
 
   try {
-    // 1. 전체 데이터 조회 (용량이 매우 클 경우 페이징 처리가 필요할 수 있으나 우선 통째로 가져옴)
+    // 1. 전체 데이터 조회 (최신 스키마에 맞춰 updated_at 기준 정렬)
     const { data: rows, error: fetchErr } = await supabase
       .from(targetTable)
       .select('*')
-      .order('recorded_date', { ascending: true });
+      .order('updated_at', { ascending: true });
 
     if (fetchErr) throw fetchErr;
     if (!rows || rows.length === 0) {
