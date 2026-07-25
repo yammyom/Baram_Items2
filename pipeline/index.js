@@ -69,7 +69,7 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
     const createdAt = rawCreatedAt ? rawCreatedAt.split('T')[0] : null;
 
     const PET_NAMES = ["주작", "현무", "백호", "청룡", "황룡", "혼돈", "도올", "궁기", "도철", "고대불의", "고대바람의", "고대땅의", "고대물의", "생명의목걸이"];
-    
+
     const itemsToProcessRaw = (equipResp.data.item_equipment || [])
       .filter(i => i.item_id)
       .map(i => {
@@ -204,14 +204,14 @@ async function runPipeline() {
         const chunk = characterNames.slice(i, i + BATCH_SIZE);
         const results = await Promise.all(chunk.map(name => limit(() => processCharacter(name, serverName, dbServerId, jobCode))));
         const validResults = results.filter(r => r !== null);
-        
+
         if (validResults.length > 0) {
           // 1. 기존 users 및 items UPSERT
           await supabase.rpc('upsert_character_data_batch', { p_characters: validResults });
-          
+
           // 2. In-Memory Delta Check (character_master, ocid 기준)
           const ocids = validResults.map(r => r.ocid);
-          
+
           const { data: existingData, error: expErr } = await supabase
             .from('character_master')
             .select('ocid, exp')
@@ -241,10 +241,10 @@ async function runPipeline() {
             const yyyy = date.getFullYear();
             const mm = String(date.getMonth() + 1).padStart(2, '0');
             const tableName = `character_state_${yyyy}_${mm}`;
-            
-            await supabase.rpc('upsert_character_state_batch', { 
+
+            await supabase.rpc('upsert_character_state_batch', {
               p_table_name: tableName,
-              p_characters: deltaCharacters 
+              p_characters: deltaCharacters
             });
           }
           process.stdout.write(`[수집:${validResults.length}/활성:${deltaCharacters.length}] `);
@@ -261,8 +261,8 @@ async function runPipeline() {
     await cleanupOldData();
 
     console.log('\n[*] 휴면 캐릭터 감지 중...');
-    const { data: dormantCount, error: dormantErr } = await supabase.rpc('detect_dormant_users_dynamic', { 
-      p_dormant_days: 7 
+    const { data: dormantCount, error: dormantErr } = await supabase.rpc('detect_dormant_users_dynamic', {
+      p_dormant_days: 15
     });
     if (dormantErr) console.error('❌ 휴면 감지 실패:', dormantErr.message);
     else console.log(`[*] 신규 휴면 처리: ${dormantCount || 0}명`);
