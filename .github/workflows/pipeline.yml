@@ -30,6 +30,3 @@ jobs:
           NEXON_API_KEY: ${{ secrets.NEXON_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: node pipeline/index.js
-
-      - name: Keepalive Workflow
-        uses: gautamkrishnar/keepalive-workflow@v2
