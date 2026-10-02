@@ -31,8 +31,97 @@ const PART_MAP = {
   '캐시 방패/보조무기': 22, '캐시방패/보조무기': 22
 };
 
-const limit = pLimit(30);
-const webLimit = pLimit(10);
+const limit = pLimit(100);
+const webLimit = pLimit(25);
+
+const MAX_QUEUE_SIZE = 2;
+const dbQueue = [];
+let dbWorkerActive = false;
+let totalSavedUsers = 0;
+
+async function processDbBatch(batch) {
+  const { error: dataError } = await supabase.rpc('upsert_character_data_batch', { p_characters: batch });
+  if (dataError) throw dataError;
+
+  const ocids = batch.map(r => r.ocid);
+  const { data: existingData, error: expErr } = await supabase
+    .from('character_master')
+    .select('ocid, exp')
+    .in('ocid', ocids);
+
+  if (expErr) throw expErr;
+
+  const expMap = new Map();
+  if (existingData) {
+    existingData.forEach(row => {
+      expMap.set(row.ocid, BigInt(row.exp || 0));
+    });
+  }
+
+  const deltaCharacters = batch.filter(r => {
+    const currentExp = BigInt(r.exp);
+    const prevExp = expMap.get(r.ocid);
+    return prevExp === undefined || prevExp !== currentExp;
+  });
+
+  if (deltaCharacters.length > 0) {
+    const date = new Date();
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const tableName = `character_state_${yyyy}_${mm}`;
+
+    const { error: stateError } = await supabase.rpc('upsert_character_state_batch', {
+      p_table_name: tableName,
+      p_characters: deltaCharacters
+    });
+    if (stateError) throw stateError;
+  }
+
+  return deltaCharacters.length;
+}
+
+async function startDbWorker() {
+  if (dbWorkerActive) return;
+  dbWorkerActive = true;
+
+  while (dbQueue.length > 0) {
+    const { batch, i } = dbQueue.shift();
+
+    let saved = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const deltaCount = await processDbBatch(batch);
+        totalSavedUsers += batch.length;
+        process.stdout.write(`[수집:${batch.length}/활성:${deltaCount}] `);
+        saved = true;
+        break;
+      } catch (err) {
+        console.warn(`\n⚠️ DB 처리 실패 (${attempt}/3회): ${err.message}`);
+        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+      }
+    }
+
+    if (!saved) {
+      console.error(`\n❌ [치명적] 배치 영구 실패 (${i} ~ ${i + batch.length})`);
+    }
+  }
+
+  dbWorkerActive = false;
+}
+
+async function enqueueBatch(batch, i) {
+  while (dbQueue.length >= MAX_QUEUE_SIZE) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+  dbQueue.push({ batch, i });
+  startDbWorker();
+}
+
+async function flushDbQueue() {
+  while (dbQueue.length > 0 || dbWorkerActive) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+}
 
 async function fetchWithRetry(url, params = {}, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -49,7 +138,8 @@ async function getOcid(characterName, serverName) {
   try {
     const resp = await axios.get('https://open.api.nexon.com/baram/v1/id', {
       params: { character_name: characterName, server_name: serverName },
-      headers: { 'x-nxopen-api-key': NEXON_API_KEY }
+      headers: { 'x-nxopen-api-key': NEXON_API_KEY },
+      timeout: 8000
     });
     return resp.data.ocid;
   } catch { return null; }
@@ -61,8 +151,8 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
     if (!ocid) return null;
 
     const [basicResp, equipResp] = await Promise.all([
-      axios.get('https://open.api.nexon.com/baram/v1/character/basic', { params: { ocid }, headers: { 'x-nxopen-api-key': NEXON_API_KEY } }),
-      axios.get('https://open.api.nexon.com/baram/v1/character/item-equipment', { params: { ocid }, headers: { 'x-nxopen-api-key': NEXON_API_KEY } })
+      axios.get('https://open.api.nexon.com/baram/v1/character/basic', { params: { ocid }, headers: { 'x-nxopen-api-key': NEXON_API_KEY }, timeout: 8000 }),
+      axios.get('https://open.api.nexon.com/baram/v1/character/item-equipment', { params: { ocid }, headers: { 'x-nxopen-api-key': NEXON_API_KEY }, timeout: 8000 })
     ]);
 
     const rawCreatedAt = basicResp.data.character_date_create;
@@ -206,69 +296,33 @@ async function runPipeline() {
         const validResults = results.filter(r => r !== null);
 
         if (validResults.length > 0) {
-          // 1. 기존 users 및 items UPSERT
-          await supabase.rpc('upsert_character_data_batch', { p_characters: validResults });
-
-          // 2. In-Memory Delta Check (character_master, ocid 기준)
-          const ocids = validResults.map(r => r.ocid);
-
-          const { data: existingData, error: expErr } = await supabase
-            .from('character_master')
-            .select('ocid, exp')
-            .in('ocid', ocids);
-
-          if (expErr) {
-            console.error('❌ 기존 exp 조회 실패:', expErr.message);
-          }
-
-          const expMap = new Map();
-          if (existingData) {
-            existingData.forEach(row => {
-              expMap.set(row.ocid, BigInt(row.exp || 0));
-            });
-          }
-
-          // 변동이 있거나(Delta), 신규 유저만 추출
-          const deltaCharacters = validResults.filter(r => {
-            const currentExp = BigInt(r.exp);
-            const prevExp = expMap.get(r.ocid);
-            return prevExp === undefined || prevExp !== currentExp;
-          });
-
-          // 3. 변동분(Delta)만 월별 상태 테이블 및 character_master에 갱신
-          if (deltaCharacters.length > 0) {
-            const date = new Date();
-            const yyyy = date.getFullYear();
-            const mm = String(date.getMonth() + 1).padStart(2, '0');
-            const tableName = `character_state_${yyyy}_${mm}`;
-
-            await supabase.rpc('upsert_character_state_batch', {
-              p_table_name: tableName,
-              p_characters: deltaCharacters
-            });
-          }
-          process.stdout.write(`[수집:${validResults.length}/활성:${deltaCharacters.length}] `);
+          await enqueueBatch(validResults, i);
         } else {
           process.stdout.write(`[수집:0] `);
         }
       }
-
+      await flushDbQueue();
       console.log(`\n    -> ${characterNames.length}명의 캐릭터명 수집 및 저장 완료`);
     }
   }
 
+  const MIN_SAVED_THRESHOLD = 100000;
   if (targetJob === null && targetServer === null) {
-    await cleanupOldData();
+    if (totalSavedUsers >= MIN_SAVED_THRESHOLD) {
+      await cleanupOldData();
 
-    console.log('\n[*] 휴면 캐릭터 감지 중...');
-    const { data: dormantCount, error: dormantErr } = await supabase.rpc('detect_dormant_users_dynamic', {
-      p_dormant_days: 15
-    });
-    if (dormantErr) console.error('❌ 휴면 감지 실패:', dormantErr.message);
-    else console.log(`[*] 신규 휴면 처리: ${dormantCount || 0}명`);
+      console.log('\n[*] 휴면 캐릭터 감지 중...');
+      const { data: dormantCount, error: dormantErr } = await supabase.rpc('detect_dormant_users_dynamic', {
+        p_dormant_days: 15
+      });
+      if (dormantErr) console.error('❌ 휴면 감지 실패:', dormantErr.message);
+      else console.log(`[*] 신규 휴면 처리: ${dormantCount || 0}명`);
 
-    console.log('\n[*] 3개월 전 백업 및 정리 시작...');
-    await cleanupOldMonths();
+      console.log('\n[*] 3개월 전 백업 및 정리 시작...');
+      await cleanupOldMonths();
+    } else {
+      console.warn(`\n⚠️ 정상 수집된 유저 수(${totalSavedUsers}명)가 안전 기준(${MIN_SAVED_THRESHOLD}명) 미만이므로 데이터 보호를 위해 정리 작업을 건너뜁니다.`);
+    }
   }
   console.log('\n>>> 파이프라인 완료', new Date().getTime() - start, 'ms');
 }
