@@ -6,7 +6,7 @@ const zlib = require('zlib');
 const path = require('path');
 require('dotenv').config();
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 async function cleanupOldMonths() {
   const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
