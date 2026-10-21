@@ -140,71 +140,35 @@ export default {
     const validResults = results.filter(Boolean);
 
     if (validResults.length > 0) {
-      // 동일 배치 내 중복 캐릭터 방어 (ON CONFLICT DO UPDATE는 같은 행을 두 번 건드리면 에러)
       const dedupMap = new Map();
+      const discardedMsgs = [];
       for (const r of validResults) {
-        dedupMap.set(`${r.data.server_id}_${r.data.character_name}`, r);
+        const key = `${r.data.server_id}_${r.data.character_name}`;
+        if (dedupMap.has(key)) {
+          discardedMsgs.push(dedupMap.get(key).msg);
+        }
+        dedupMap.set(key, r);
       }
       const dedupedResults = [...dedupMap.values()];
       discardedMsgs.forEach(msg => msg.ack());
       const charactersData = dedupedResults.map(r => r.data);
 
       try {
-        const { error: dataError } = await supabase.rpc('upsert_character_data_batch', {
-          p_characters: charactersData
+        const date = new Date();
+        const tableName = `character_state_${date.getFullYear()}_${String(date.getMonth() + 1).padStart(2, '0')}`;
+
+        const { data: deltaCount, error: rpcError } = await supabase.rpc('upsert_pipeline_batch', {
+          p_characters: charactersData,
+          p_table_name: tableName
         });
 
-        if (dataError) {
-          console.error(`Batch RPC Error (data):`, dataError.message);
-          throw dataError;
+        if (rpcError) {
+          console.error(`Batch RPC Error:`, rpcError.message);
+          throw rpcError;
         }
 
-        // 2. In-Memory Delta Check (경험치 변동 확인 - character_master, ocid 기준)
-        const ocids = charactersData.map(r => r.ocid);
-
-        const { data: existingData, error: expErr } = await supabase
-          .from('character_master')
-          .select('ocid, exp')
-          .in('ocid', ocids);
-
-        if (expErr) {
-          console.error('기존 exp 조회 실패:', expErr.message);
-        }
-
-        const expMap = new Map();
-        if (existingData) {
-          existingData.forEach(row => {
-            expMap.set(row.ocid, BigInt(row.exp || 0));
-          });
-        }
-
-        const deltaCharacters = charactersData.filter(r => {
-          const currentExp = BigInt(r.exp);
-          const prevExp = expMap.get(r.ocid);
-          return prevExp === undefined || prevExp !== currentExp;
-        });
-
-        // 3. 변동분(Delta)만 월별 상태 테이블 UPSERT
-        if (deltaCharacters.length > 0) {
-          const date = new Date();
-          const yyyy = date.getFullYear();
-          const mm = String(date.getMonth() + 1).padStart(2, '0');
-          const tableName = `character_state_${yyyy}_${mm}`;
-
-          const { error: stateError } = await supabase.rpc('upsert_character_state_batch', {
-            p_table_name: tableName,
-            p_characters: deltaCharacters
-          });
-
-          if (stateError) {
-            console.error(`Batch RPC Error (state):`, stateError.message);
-            throw stateError;
-          }
-        }
-
-        // 성공적으로 저장된 메시지들만 일괄 ack 처리
         dedupedResults.forEach(r => r.msg.ack());
-        console.log(`[+] 성공적으로 ${dedupedResults.length}명 처리 완료 (Delta: ${deltaCharacters.length}명)`);
+        console.log(`[+] 성공적으로 ${dedupedResults.length}명 처리 완료 (Delta: ${deltaCount || 0}명)`);
       } catch (dbErr) {
         // 핸들러가 정상 반환되면 미ack 메시지도 성공 처리로 간주함
         // 따라서 명시적으로 retry()를 호출해야 실제로 큐가 재전송함

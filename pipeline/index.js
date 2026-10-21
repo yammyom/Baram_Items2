@@ -31,53 +31,24 @@ const PART_MAP = {
   '캐시 방패/보조무기': 22, '캐시방패/보조무기': 22
 };
 
+const date = new Date();
+const CURRENT_STATE_TABLE = `character_state_${date.getFullYear()}_${String(date.getMonth() + 1).padStart(2, '0')}`;
+
 const limit = pLimit(100);
 const webLimit = pLimit(25);
 
-const MAX_QUEUE_SIZE = 2;
+const MAX_QUEUE_SIZE = 5;
 const dbQueue = [];
 let dbWorkerActive = false;
 let totalSavedUsers = 0;
 
 async function processDbBatch(batch) {
-  const { error: dataError } = await supabase.rpc('upsert_character_data_batch', { p_characters: batch });
-  if (dataError) throw dataError;
-
-  const ocids = batch.map(r => r.ocid);
-  const { data: existingData, error: expErr } = await supabase
-    .from('character_master')
-    .select('ocid, exp')
-    .in('ocid', ocids);
-
-  if (expErr) throw expErr;
-
-  const expMap = new Map();
-  if (existingData) {
-    existingData.forEach(row => {
-      expMap.set(row.ocid, BigInt(row.exp || 0));
-    });
-  }
-
-  const deltaCharacters = batch.filter(r => {
-    const currentExp = BigInt(r.exp);
-    const prevExp = expMap.get(r.ocid);
-    return prevExp === undefined || prevExp !== currentExp;
+  const { data: deltaCount, error } = await supabase.rpc('upsert_pipeline_batch', {
+    p_characters: batch,
+    p_table_name: CURRENT_STATE_TABLE
   });
-
-  if (deltaCharacters.length > 0) {
-    const date = new Date();
-    const yyyy = date.getFullYear();
-    const mm = String(date.getMonth() + 1).padStart(2, '0');
-    const tableName = `character_state_${yyyy}_${mm}`;
-
-    const { error: stateError } = await supabase.rpc('upsert_character_state_batch', {
-      p_table_name: tableName,
-      p_characters: deltaCharacters
-    });
-    if (stateError) throw stateError;
-  }
-
-  return deltaCharacters.length;
+  if (error) throw error;
+  return deltaCount || 0;
 }
 
 async function startDbWorker() {
@@ -279,6 +250,15 @@ async function runPipeline() {
   const targetServer = targetServerArg || null;
   const start = new Date().getTime();
   console.log(`>>> 유저 경계탐색 파이프라인 가동: ${MIN_PROMOTION_LEVEL}차 ~ ${MAX_PROMOTION_LEVEL}차`, start);
+
+  console.log(`[*] 월별 상태 테이블(${CURRENT_STATE_TABLE}) 초기화 확인 중...`);
+  const { error: initErr } = await supabase.rpc('init_monthly_state_table', {
+    p_table_name: CURRENT_STATE_TABLE
+  });
+  if (initErr) {
+    console.error(`❌ 테이블 초기화 실패: ${initErr.message}`);
+    throw initErr;
+  }
 
   for (const [serverName, nexonServerCode] of Object.entries(NEXON_SERVERS)) {
     if (targetServer && serverName !== targetServer) continue;
